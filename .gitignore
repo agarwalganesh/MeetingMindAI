@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Environment secrets — NEVER commit these
+.env
+.env.local
+.env.*.local
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploaded audio files and generated reports
+meetingmind-ai/uploads/*
+!meetingmind-ai/uploads/.gitkeep
+meetingmind-ai/reports/*
+!meetingmind-ai/reports/.gitkeep
+
+# Vector store data
+meetingmind-ai/chromadb/
+
+# Logs
+*.log
+logs/
+
+# Node
+node_modules/
+.npm/
+
+# Vite / frontend build
+meetingmind-ai/frontend/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
