@@ -108,9 +108,35 @@ class MeetingDetailResponse(MeetingResponse):
     class Config:
         from_attributes = True
 
+# --- Asynchronous Processing Schemas ---
+class ProcessRequest(BaseModel):
+    filename: str
+    title: str
+
+class ProcessingJobResponse(BaseModel):
+    task_id: str
+    status: str
+    stage: Optional[str] = None
+    progress: int = 0
+    meeting_id: Optional[int] = None
+    error: Optional[str] = None
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
 # --- RAG Chat Schemas ---
 class ChatRequest(BaseModel):
     message: str
+
+class ChatMessageResponse(BaseModel):
+    id: int
+    meeting_id: int
+    role: str
+    content: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 class ChatResponse(BaseModel):
     response: str

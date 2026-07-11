@@ -1,6 +1,7 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { ThemeProvider } from './context/ThemeContext';
 import Layout from './components/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
 import Login from './pages/Login';
@@ -47,6 +48,7 @@ const LayoutWrapper = ({ children }) => {
 function App() {
   return (
     <ErrorBoundary>
+    <ThemeProvider>
     <Router>
       <AuthProvider>
         <Routes>
@@ -93,6 +95,7 @@ function App() {
         </Routes>
       </AuthProvider>
     </Router>
+    </ThemeProvider>
     </ErrorBoundary>
   );
 }

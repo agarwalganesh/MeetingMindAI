@@ -1,16 +1,38 @@
 import React, { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { 
-  LayoutDashboard, 
-  FileAudio, 
-  ShieldAlert, 
-  LogOut, 
-  Menu, 
-  X, 
+import { useTheme } from '../context/ThemeContext';
+import {
+  LayoutDashboard,
+  FileAudio,
+  ShieldAlert,
+  LogOut,
+  Menu,
+  X,
   Brain,
+  Sun,
+  Moon,
   User as UserIcon
 } from 'lucide-react';
+
+// Button that flips between light and dark themes. Icon-only by default; pass
+// `label` to render a full-width labelled row (used in the sidebar).
+const ThemeToggle = ({ className = '', label = false }) => {
+  const { isDark, toggleTheme } = useTheme();
+  const Icon = isDark ? Sun : Moon;
+  const text = isDark ? 'Light mode' : 'Dark mode';
+  return (
+    <button
+      onClick={toggleTheme}
+      title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+      aria-label="Toggle color theme"
+      className={`flex items-center ${label ? 'gap-3 px-4 py-2.5 w-full text-left text-sm' : 'justify-center'} rounded-xl border border-slate-800 bg-slate-900/60 text-slate-400 hover:text-white hover:border-slate-700 transition-colors ${className}`}
+    >
+      <Icon className="w-4 h-4" />
+      {label && <span>{text}</span>}
+    </button>
+  );
+};
 
 const Layout = ({ children }) => {
   const { user, logout, isAdmin } = useAuth();
@@ -82,6 +104,7 @@ const Layout = ({ children }) => {
               <p className="text-xs text-slate-500 truncate">{user?.email}</p>
             </div>
           </div>
+          <ThemeToggle label />
           <button
             onClick={handleLogout}
             className="flex items-center gap-3 px-4 py-2.5 rounded-xl hover:bg-red-500/10 hover:text-red-400 text-slate-400 transition-colors w-full text-left text-sm"
@@ -93,7 +116,8 @@ const Layout = ({ children }) => {
       </aside>
 
       {/* Mobile Menu Button */}
-      <div className="md:hidden fixed top-4 right-4 z-50">
+      <div className="md:hidden fixed top-4 right-4 z-50 flex items-center gap-2">
+        <ThemeToggle className="p-2.5 shadow-lg" />
         <button
           onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
           className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 hover:text-white transition-all shadow-lg"

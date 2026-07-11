@@ -1,26 +1,32 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import WaveSurfer from 'wavesurfer.js';
 import api from '../utils/api';
-import { 
-  FileText, 
-  Sparkles, 
-  ListTodo, 
-  Gavel, 
-  MessageSquare, 
-  Download, 
-  Copy, 
-  Save, 
-  Edit, 
-  Check, 
-  Trash2, 
-  Plus, 
-  Loader2, 
+import { exportActionItemsCSV, exportActionItemsXLSX, exportTranscriptMarkdown } from '../utils/export';
+import {
+  FileText,
+  Sparkles,
+  ListTodo,
+  Gavel,
+  MessageSquare,
+  Download,
+  Copy,
+  Save,
+  Edit,
+  Check,
+  Trash2,
+  Plus,
+  Loader2,
   Send,
   PieChart as PieIcon,
   HelpCircle,
   FileCheck,
   AlertTriangle,
-  RotateCw
+  RotateCw,
+  Play,
+  Pause,
+  FileSpreadsheet,
+  Sheet
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -45,11 +51,11 @@ const MeetingDetails = () => {
   const [copiedTranscript, setCopiedTranscript] = useState(false);
 
   // Chat state
+  const GREETING = { role: 'assistant', text: 'Hi! Ask me anything about this meeting\'s contents, discussions, decisions, or deadlines.' };
   const [chatInput, setChatInput] = useState('');
-  const [chatHistory, setChatHistory] = useState([
-    { role: 'assistant', text: 'Hi! Ask me anything about this meeting\'s contents, discussions, decisions, or deadlines.' }
-  ]);
+  const [chatHistory, setChatHistory] = useState([GREETING]);
   const [chatLoading, setChatLoading] = useState(false);
+  const [clearingChat, setClearingChat] = useState(false);
   const chatEndRef = useRef(null);
 
   // Action Items editing state
@@ -60,13 +66,134 @@ const MeetingDetails = () => {
   // PDF Download state
   const [downloadingPDF, setDownloadingPDF] = useState(false);
 
+  // Audio waveform player state
+  const waveformRef = useRef(null);
+  const wavesurferRef = useRef(null);
+  const audioUrlRef = useRef(null);
+  const [audioAvailable, setAudioAvailable] = useState(false);
+  const [waveReady, setWaveReady] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+
   useEffect(() => {
     fetchMeetingDetails();
+    fetchChatHistory();
   }, [id]);
+
+  // Fetch the audio (auth'd, as a blob so the JWT header applies) and render a
+  // WaveSurfer waveform. Waits until the meeting has loaded so the waveform
+  // container is mounted. Cleaned up on unmount / id change.
+  useEffect(() => {
+    if (loading || !waveformRef.current) return;
+    let cancelled = false;
+
+    const setup = async () => {
+      try {
+        const res = await api.get(`/meeting/${id}/audio`, { responseType: 'blob' });
+        if (cancelled) return;
+        const url = URL.createObjectURL(res.data);
+        audioUrlRef.current = url;
+        setAudioAvailable(true);
+
+        const ws = WaveSurfer.create({
+          container: waveformRef.current,
+          height: 60,
+          waveColor: '#64748b',
+          progressColor: '#3b82f6',
+          cursorColor: '#6366f1',
+          barWidth: 2,
+          barGap: 1,
+          barRadius: 2,
+          url,
+        });
+        wavesurferRef.current = ws;
+        ws.on('ready', () => { if (!cancelled) { setDuration(ws.getDuration()); setWaveReady(true); } });
+        ws.on('timeupdate', (t) => { if (!cancelled) setCurrentTime(t); });
+        ws.on('play', () => { if (!cancelled) setIsPlaying(true); });
+        ws.on('pause', () => { if (!cancelled) setIsPlaying(false); });
+        ws.on('finish', () => { if (!cancelled) setIsPlaying(false); });
+      } catch {
+        // 404 (file removed / mock) or network error — hide the player gracefully.
+        if (!cancelled) setAudioAvailable(false);
+      }
+    };
+    setup();
+
+    return () => {
+      cancelled = true;
+      if (wavesurferRef.current) {
+        try { wavesurferRef.current.destroy(); } catch { /* already gone */ }
+        wavesurferRef.current = null;
+      }
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+        audioUrlRef.current = null;
+      }
+      setWaveReady(false);
+      setIsPlaying(false);
+      setCurrentTime(0);
+      setDuration(0);
+    };
+  }, [id, loading]);
+
+  const formatTime = (secs) => {
+    if (!secs || !isFinite(secs)) return '0:00';
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60);
+    return `${m}:${String(s).padStart(2, '0')}`;
+  };
+
+  const togglePlay = () => wavesurferRef.current?.playPause();
+
+  // Approximate seek: map a transcript line to a point in the audio by its
+  // character offset (the stored transcript has no per-line timestamps, so this
+  // is proportional rather than exact).
+  const transcriptLines = meeting?.transcript ? meeting.transcript.split('\n') : [];
+  const lineFraction = (index) => {
+    const total = transcriptLines.reduce((n, l) => n + l.length + 1, 0) || 1;
+    let before = 0;
+    for (let i = 0; i < index; i++) before += transcriptLines[i].length + 1;
+    return Math.min(0.999, before / total);
+  };
+  const seekToLine = (index) => {
+    const ws = wavesurferRef.current;
+    if (!ws || !waveReady) return;
+    ws.seekTo(lineFraction(index));
+    ws.play();
+  };
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatHistory]);
+
+  const fetchChatHistory = async () => {
+    try {
+      const res = await api.get(`/meeting/${id}/chat-history`);
+      if (Array.isArray(res.data) && res.data.length > 0) {
+        setChatHistory([
+          GREETING,
+          ...res.data.map((m) => ({ role: m.role, text: m.content })),
+        ]);
+      }
+    } catch (err) {
+      // Non-fatal: fall back to a fresh conversation.
+      console.error('Failed to load chat history:', err);
+    }
+  };
+
+  const handleClearChat = async () => {
+    setClearingChat(true);
+    try {
+      await api.delete(`/meeting/${id}/chat-history`);
+      setChatHistory([GREETING]);
+    } catch (err) {
+      console.error('Failed to clear chat history:', err);
+      alert('Failed to clear chat history.');
+    } finally {
+      setClearingChat(false);
+    }
+  };
 
   const fetchMeetingDetails = async () => {
     try {
@@ -246,7 +373,7 @@ const MeetingDetails = () => {
         <button
           onClick={handleDownloadPDF}
           disabled={downloadingPDF}
-          className="flex items-center gap-2 bg-gradient-to-r from-primary-600 to-indigo-600 hover:from-primary-500 hover:to-indigo-500 disabled:from-slate-800 disabled:to-slate-850 disabled:text-slate-650 text-white px-5 py-3 rounded-2xl font-bold text-sm transition-all shadow-lg glow-primary focus:outline-none"
+          className="flex items-center gap-2 bg-gradient-to-r from-primary-600 to-indigo-600 hover:from-primary-500 hover:to-indigo-500 disabled:from-slate-800 disabled:to-slate-850 disabled:text-slate-650 text-on-accent px-5 py-3 rounded-2xl font-bold text-sm transition-all shadow-lg glow-primary focus:outline-none"
         >
           {downloadingPDF ? (
             <>
@@ -267,7 +394,29 @@ const MeetingDetails = () => {
         
         {/* Left Side: Workspaces tabs */}
         <div className="lg:col-span-2 space-y-6">
-          
+
+          {/* Audio waveform player (container stays mounted; card hides until ready) */}
+          <div className={`glass-panel p-4 rounded-3xl border border-slate-800 shadow-2xl ${audioAvailable ? '' : 'hidden'}`}>
+            <div className="flex items-center gap-4">
+              <button
+                onClick={togglePlay}
+                disabled={!waveReady}
+                title={isPlaying ? 'Pause' : 'Play'}
+                className="shrink-0 w-11 h-11 rounded-full bg-primary-600 hover:bg-primary-500 disabled:bg-slate-800 text-on-accent flex items-center justify-center transition-colors shadow-lg glow-primary"
+              >
+                {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-0.5" />}
+              </button>
+              <div ref={waveformRef} className="flex-1 min-w-0" />
+              <span className="shrink-0 text-xs text-slate-400 font-mono tabular-nums whitespace-nowrap">
+                {formatTime(currentTime)} / {formatTime(duration)}
+              </span>
+            </div>
+            <p className="text-[10px] text-slate-500 mt-2 flex items-center gap-1">
+              <FileText className="w-3 h-3" />
+              Click any line in the Transcript tab to jump to that point (approximate).
+            </p>
+          </div>
+
           {/* Tab buttons */}
           <div className="flex gap-2 overflow-x-auto pb-1 border-b border-slate-900 scrollbar-none">
             {[
@@ -339,18 +488,26 @@ const MeetingDetails = () => {
                     >
                       {copiedTranscript ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
                     </button>
-                    <button 
+                    <button
                       onClick={handleDownloadTxt}
                       className="p-2 rounded-lg bg-slate-950 text-slate-400 hover:text-white border border-slate-800 hover:bg-slate-900 transition-colors"
-                      title="Download Text File"
+                      title="Download Text File (.txt)"
                     >
                       <Download className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => exportTranscriptMarkdown(meeting)}
+                      className="flex items-center gap-1.5 px-2.5 py-2 rounded-lg bg-slate-950 text-slate-400 hover:text-white border border-slate-800 hover:bg-slate-900 transition-colors text-[10px] font-bold"
+                      title="Download as Markdown (.md)"
+                    >
+                      <FileText className="w-3.5 h-3.5" />
+                      MD
                     </button>
                     <button 
                       onClick={() => setIsEditingTranscript(!isEditingTranscript)}
                       className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border border-slate-800 ${
                         isEditingTranscript 
-                          ? 'bg-amber-600 text-white border-transparent' 
+                          ? 'bg-amber-600 text-on-accent border-transparent'
                           : 'bg-slate-950 text-slate-300 hover:text-white hover:bg-slate-900'
                       } transition-colors`}
                     >
@@ -371,7 +528,7 @@ const MeetingDetails = () => {
                       <button
                         onClick={handleSaveTranscript}
                         disabled={savingTranscript}
-                        className="flex items-center gap-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs px-5 py-2.5 rounded-xl transition-colors shadow-lg glow-emerald focus:outline-none"
+                        className="flex items-center gap-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-on-accent font-bold text-xs px-5 py-2.5 rounded-xl transition-colors shadow-lg glow-emerald focus:outline-none"
                       >
                         {savingTranscript ? (
                           <>
@@ -390,9 +547,19 @@ const MeetingDetails = () => {
                 ) : (
                   <div className="bg-slate-950/25 border border-slate-850 p-6 rounded-2xl max-h-80 overflow-y-auto text-sm text-slate-300 space-y-4 leading-relaxed font-sans">
                     {meeting.transcript ? (
-                      meeting.transcript.split('\n').map((line, idx) => (
-                        <p key={idx}>{line}</p>
-                      ))
+                      transcriptLines.map((line, idx) => {
+                        const clickable = waveReady && !!line.trim();
+                        return (
+                          <p
+                            key={idx}
+                            onClick={clickable ? () => seekToLine(idx) : undefined}
+                            title={clickable ? `Jump to ~${formatTime(lineFraction(idx) * duration)}` : undefined}
+                            className={clickable ? 'cursor-pointer rounded-lg -mx-2 px-2 py-1 hover:bg-primary-500/10 hover:text-white transition-colors' : ''}
+                          >
+                            {line}
+                          </p>
+                        );
+                      })
                     ) : (
                       <p className="text-slate-500 italic text-center py-12">No transcript generated.</p>
                     )}
@@ -404,11 +571,31 @@ const MeetingDetails = () => {
             {/* Action Items Tab */}
             {activeTab === 'actions' && (
               <div className="space-y-6 animate-fade-in">
-                <div className="flex justify-between items-center pb-2 border-b border-slate-900">
+                <div className="flex justify-between items-center gap-3 pb-2 border-b border-slate-900">
                   <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest">Action Assignments</h3>
-                  <span className="text-[10px] text-slate-500 bg-slate-950 px-2 py-1 rounded border border-slate-850">
-                    Auto-saves status updates
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="hidden sm:inline text-[10px] text-slate-500 bg-slate-950 px-2 py-1 rounded border border-slate-850">
+                      Auto-saves
+                    </span>
+                    <button
+                      onClick={() => exportActionItemsCSV(meeting)}
+                      disabled={!meeting.action_items?.length}
+                      title="Export action items as CSV"
+                      className="flex items-center gap-1.5 text-[11px] font-bold px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-850 text-slate-300 hover:text-white hover:border-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      <Sheet className="w-3.5 h-3.5" />
+                      CSV
+                    </button>
+                    <button
+                      onClick={() => exportActionItemsXLSX(meeting).catch(() => alert('Failed to export Excel file.'))}
+                      disabled={!meeting.action_items?.length}
+                      title="Export action items as Excel (.xlsx)"
+                      className="flex items-center gap-1.5 text-[11px] font-bold px-2.5 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5" />
+                      Excel
+                    </button>
+                  </div>
                 </div>
 
                 {meeting.action_items?.length === 0 ? (
@@ -512,7 +699,7 @@ const MeetingDetails = () => {
                                   <button
                                     onClick={() => handleSaveActionItem(act.id)}
                                     disabled={savingActionId === act.id}
-                                    className="p-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
+                                    className="p-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-on-accent transition-colors"
                                   >
                                     {savingActionId === act.id ? (
                                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -672,10 +859,22 @@ const MeetingDetails = () => {
               <div className="w-9 h-9 rounded-xl bg-primary-600/10 text-primary-400 border border-primary-500/20 flex items-center justify-center">
                 <MessageSquare className="w-5 h-5" />
               </div>
-              <div>
+              <div className="flex-1">
                 <h3 className="font-bold text-sm text-white">MeetingMind Agent</h3>
                 <p className="text-[10px] text-slate-500 font-semibold">Semantic Context Search active</p>
               </div>
+              {chatHistory.length > 1 && (
+                <button
+                  onClick={handleClearChat}
+                  disabled={clearingChat}
+                  title="Clear conversation history"
+                  className="p-2 rounded-lg text-slate-500 hover:text-red-400 hover:bg-slate-900 disabled:opacity-50 transition-all"
+                >
+                  {clearingChat
+                    ? <Loader2 className="w-4 h-4 animate-spin" />
+                    : <Trash2 className="w-4 h-4" />}
+                </button>
+              )}
             </div>
 
             {/* Chat Messages */}
@@ -687,7 +886,7 @@ const MeetingDetails = () => {
                 >
                   <div className={`p-3.5 rounded-2xl max-w-[85%] leading-relaxed shadow-md ${
                     msg.role === 'user'
-                      ? 'bg-gradient-to-tr from-primary-600 to-indigo-650 text-white rounded-tr-none'
+                      ? 'bg-gradient-to-tr from-primary-600 to-indigo-650 text-on-accent rounded-tr-none'
                       : 'bg-slate-900 text-slate-200 border border-slate-850 rounded-tl-none'
                   }`}>
                     {msg.text.split('\n').map((para, i) => (
@@ -745,7 +944,7 @@ const MeetingDetails = () => {
               <button
                 type="submit"
                 disabled={chatLoading}
-                className="p-3 rounded-xl bg-primary-600 hover:bg-primary-500 disabled:bg-slate-800 text-white transition-all shadow-lg glow-primary"
+                className="p-3 rounded-xl bg-primary-600 hover:bg-primary-500 disabled:bg-slate-800 text-on-accent transition-all shadow-lg glow-primary"
               >
                 <Send className="w-3.5 h-3.5" />
               </button>

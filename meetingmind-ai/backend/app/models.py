@@ -43,6 +43,12 @@ class Meeting(Base):
     user = relationship("User", back_populates="meetings")
     action_items = relationship("ActionItem", back_populates="meeting", cascade="all, delete-orphan")
     decisions = relationship("Decision", back_populates="meeting", cascade="all, delete-orphan")
+    chat_messages = relationship(
+        "ChatMessage",
+        back_populates="meeting",
+        cascade="all, delete-orphan",
+        order_by="ChatMessage.created_at",
+    )
 
 class ActionItem(Base):
     __tablename__ = "action_items"
@@ -67,3 +73,49 @@ class Decision(Base):
 
     # Relationships
     meeting = relationship("Meeting", back_populates="decisions")
+
+class ProcessingJob(Base):
+    """An asynchronous transcription + analysis job.
+
+    Created by ``POST /process`` and worked in a background thread so the HTTP
+    request returns immediately with a ``task_id`` instead of blocking on
+    Whisper/LLM calls. The row is the durable source of truth for both polling
+    (``GET /jobs/{id}``) and the live SSE stream (``GET /jobs/{id}/stream``).
+    """
+    __tablename__ = "processing_jobs"
+
+    # Opaque, unguessable id used as the public task_id.
+    id = Column(String, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    # Set once transcription produces a meeting record; null while queued/running.
+    meeting_id = Column(Integer, ForeignKey("meetings.id", ondelete="SET NULL"), nullable=True)
+
+    filename = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+
+    # Lifecycle: queued -> transcribing -> summarizing -> extracting -> completed
+    #            (or -> failed at any point).
+    status = Column(String, nullable=False, default="queued")
+    stage = Column(String, nullable=True)      # human-readable label for the UI
+    progress = Column(Integer, default=0)      # 0-100
+    error = Column(Text, nullable=True)        # populated when status == "failed"
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class ChatMessage(Base):
+    """A single turn in the conversational RAG chat for a meeting.
+
+    Persisting messages lets the /chat endpoint pass previous turns back to the
+    LLM so it can answer follow-up questions with the context of the dialogue.
+    """
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    meeting_id = Column(Integer, ForeignKey("meetings.id", ondelete="CASCADE"), nullable=False, index=True)
+    role = Column(String, nullable=False)  # 'user' or 'assistant'
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    meeting = relationship("Meeting", back_populates="chat_messages")

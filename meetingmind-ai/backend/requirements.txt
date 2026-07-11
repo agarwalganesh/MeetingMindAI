@@ -18,6 +18,12 @@ faster-whisper>=1.0.0
 # Optional — GPU acceleration for faster-whisper on NVIDIA cards (Windows/Linux):
 # nvidia-cublas-cu12
 # nvidia-cudnn-cu12
+# Optional — acoustic speaker diarization (labels turns "Speaker 1:", "Speaker 2:").
+# Requires a HuggingFace token (HUGGINGFACE_TOKEN) with access to the gated model
+# pyannote/speaker-diarization-3.1. Without these, diarization degrades to a
+# text-based heuristic. pyannote.audio pulls in torch (~2GB+):
+# pyannote.audio>=3.1.0
+# torch>=2.6.0
 # Optional — only for VibeVoice ASR (needs a 16GB+ VRAM GPU server; ~16GB model download):
 # transformers>=5.3.0
 # torch>=2.6.0

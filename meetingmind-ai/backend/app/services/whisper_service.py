@@ -1,5 +1,7 @@
 import os
+import re
 from pathlib import Path
+from typing import List, Dict, Optional, Tuple
 from openai import OpenAI
 from ..config import settings
 
@@ -46,6 +48,15 @@ try:
 except ImportError:
     HAS_SHUKA = False
 
+# Optional acoustic speaker diarization. Heavy (pyannote.audio + torch) and the
+# model is gated behind a HuggingFace token, so it is strictly optional — when
+# absent, diarization degrades to a text-based heuristic.
+try:
+    from pyannote.audio import Pipeline as PyannotePipeline
+    HAS_PYANNOTE = True
+except ImportError:
+    HAS_PYANNOTE = False
+
 # Preferred faster-whisper models, best quality first — all multilingual
 # (Hindi, English, 90+ languages). The first one that loads successfully is
 # kept for the lifetime of the process.
@@ -86,6 +97,7 @@ class WhisperService:
         self.shuka_pipe = None
         self.vibevoice_model = None
         self.vibevoice_processor = None
+        self.pyannote_pipeline = None
         if self.api_key and self.api_key.strip() and not self.api_key.startswith("your_"):
             try:
                 self.client = OpenAI(api_key=self.api_key)
@@ -150,16 +162,38 @@ class WhisperService:
         print("Transcription completed.")
         return text
 
-    def _transcribe_with_local_model(self, file_path: str) -> str:
+    def _run_faster_whisper_words(self, model, file_path: str) -> Tuple[List[Dict], str]:
+        """Transcribe with word-level timestamps. Returns (words, plain_text)
+        where each word is {"start", "end", "word"} — the timestamps let us
+        align each word to a diarized speaker turn."""
+        segments, _ = model.transcribe(
+            file_path,
+            beam_size=5,
+            vad_filter=True,
+            word_timestamps=True,
+        )
+        words: List[Dict] = []
+        texts: List[str] = []
+        for segment in segments:
+            seg_text = segment.text.strip()
+            if seg_text:
+                texts.append(seg_text)
+            for w in (segment.words or []):
+                words.append({"start": w.start, "end": w.end, "word": w.word})
+        print("Transcription completed.")
+        return words, "\n".join(texts)
+
+    def _run_local(self, runner, file_path: str):
+        """Run ``runner(model, file_path)`` against the local faster-whisper
+        model, rebuilding once on CPU if GPU inference fails at runtime (e.g.
+        missing cuDNN DLLs on Windows)."""
         model = self._initialize_local_model()
         if model is None:
             raise RuntimeError("No local faster-whisper model is available.")
 
         try:
-            return self._run_faster_whisper(model, file_path)
+            return runner(model, file_path)
         except Exception as e:
-            # CUDA can also fail at inference time (e.g. missing cuDNN DLLs on
-            # Windows). Rebuild once on CPU before giving up on faster-whisper.
             if self.local_device == "cuda":
                 print(f"GPU inference failed: {e}. Retrying on CPU...")
                 self.force_cpu = True
@@ -167,8 +201,138 @@ class WhisperService:
                 model = self._initialize_local_model()
                 if model is None:
                     raise
-                return self._run_faster_whisper(model, file_path)
+                return runner(model, file_path)
             raise
+
+    def _transcribe_with_local_model(self, file_path: str) -> str:
+        return self._run_local(self._run_faster_whisper, file_path)
+
+    def _transcribe_and_diarize_local(self, file_path: str) -> str:
+        """faster-whisper transcription with word timestamps, aligned to
+        pyannote speaker turns. Falls back to a text heuristic when acoustic
+        diarization is unavailable."""
+        words, plain_text = self._run_local(self._run_faster_whisper_words, file_path)
+        turns = self._diarize_with_pyannote(file_path)
+        if turns:
+            diarized = self._merge_words_and_turns(words, turns)
+            if diarized.strip():
+                return diarized
+        return self._diarize_text_heuristic(plain_text)
+
+    # ------------------- speaker diarization (optional pyannote + heuristic fallback) -------------------
+
+    def _initialize_pyannote(self):
+        """Lazily load the pyannote diarization pipeline. Returns None (and logs
+        why) when the package is missing or no valid HuggingFace token is set."""
+        if not HAS_PYANNOTE:
+            return None
+
+        token = (settings.HUGGINGFACE_TOKEN or "").strip()
+        if not token or token.startswith("your_"):
+            print(
+                "Diarization: HUGGINGFACE_TOKEN not configured; "
+                "skipping pyannote and using heuristic segmentation."
+            )
+            return None
+
+        if self.pyannote_pipeline is None:
+            try:
+                print("Loading pyannote speaker diarization pipeline...")
+                self.pyannote_pipeline = PyannotePipeline.from_pretrained(
+                    settings.DIARIZATION_MODEL,
+                    use_auth_token=token,
+                )
+                # Use the GPU when one is available for a large speedup.
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        self.pyannote_pipeline.to(torch.device("cuda"))
+                        print("Diarization running on GPU.")
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"Failed to load pyannote diarization pipeline: {e}")
+                self.pyannote_pipeline = None
+        return self.pyannote_pipeline
+
+    def _diarize_with_pyannote(self, file_path: str) -> Optional[List[Tuple[float, float, str]]]:
+        """Return a list of (start, end, speaker_label) turns, or None if
+        acoustic diarization is unavailable or fails."""
+        pipeline = self._initialize_pyannote()
+        if pipeline is None:
+            return None
+        try:
+            diarization = pipeline(file_path)
+            turns = [
+                (turn.start, turn.end, speaker)
+                for turn, _, speaker in diarization.itertracks(yield_label=True)
+            ]
+            return turns or None
+        except Exception as e:
+            print(f"pyannote diarization failed: {e}. Using heuristic segmentation.")
+            return None
+
+    def _merge_words_and_turns(
+        self, words: List[Dict], turns: List[Tuple[float, float, str]]
+    ) -> str:
+        """Assign each transcribed word to the overlapping speaker turn, then
+        group consecutive words by speaker into 'Speaker N: ...' lines."""
+        if not words or not turns:
+            return ""
+
+        def speaker_for(w_start: float, w_end: float) -> str:
+            best_speaker, best_overlap = None, 0.0
+            for start, end, speaker in turns:
+                overlap = min(w_end, end) - max(w_start, start)
+                if overlap > best_overlap:
+                    best_overlap, best_speaker = overlap, speaker
+            if best_speaker is None:
+                # No overlap (e.g. word in a gap) — pick the nearest turn.
+                midpoint = (w_start + w_end) / 2
+                best_speaker = min(
+                    turns, key=lambda t: abs((t[0] + t[1]) / 2 - midpoint)
+                )[2]
+            return best_speaker
+
+        # Map raw pyannote labels (SPEAKER_00, ...) to friendly, 1-based labels
+        # in order of first appearance.
+        label_map: Dict[str, str] = {}
+        lines: List[str] = []
+        current_speaker = None
+        buffer: List[str] = []
+
+        for w in words:
+            w_start = w["start"] if w["start"] is not None else 0.0
+            w_end = w["end"] if w["end"] is not None else w_start
+            speaker = speaker_for(w_start, w_end)
+            if speaker not in label_map:
+                label_map[speaker] = f"Speaker {len(label_map) + 1}"
+
+            if speaker != current_speaker and buffer:
+                lines.append(f"{label_map[current_speaker]}: {''.join(buffer).strip()}")
+                buffer = []
+            current_speaker = speaker
+            buffer.append(w["word"])
+
+        if buffer and current_speaker is not None:
+            lines.append(f"{label_map[current_speaker]}: {''.join(buffer).strip()}")
+
+        return "\n".join(lines)
+
+    def _diarize_text_heuristic(self, text: str) -> str:
+        """Best-effort, dependency-free diarization from plain text.
+
+        We cannot distinguish voices without the audio, so this only preserves
+        explicit speaker cues that are already present ('Alex:', 'Speaker 2:',
+        etc.) — which covers LLM speech-models and the mock transcript. When no
+        such cues exist the text is returned unchanged (single speaker).
+        """
+        if not text or not text.strip():
+            return text
+        # Existing "Name:" / "Speaker N:" labels at the start of a line.
+        if re.search(r'(?m)^\s*[A-Z][A-Za-z0-9 ._-]{0,30}:\s', text):
+            return text.strip()
+        return text.strip()
 
     # ------------------- remote vLLM speech-LLM (optional, e.g. Ultravox) -------------------
 
@@ -319,7 +483,7 @@ class WhisperService:
 
     # ------------------- public API -------------------
 
-    def transcribe_audio(self, file_path: str) -> str:
+    def transcribe_audio(self, file_path: str, diarize: Optional[bool] = None) -> str:
         """
         Transcribe an audio file. Engines are tried in order:
         1. faster-whisper (local; GPU when CUDA is available, otherwise CPU;
@@ -329,18 +493,38 @@ class WhisperService:
         4. Shuka-1 Indic speech-LLM (optional, for future GPU server deployments)
         5. VibeVoice ASR (optional, for future GPU server deployments)
         6. Mock transcript (last resort so the API always returns a response)
+
+        When ``diarize`` is true (defaults to settings.ENABLE_DIARIZATION), the
+        transcript is segmented by speaker ("Speaker 1: ...", "Speaker 2: ...").
+        The faster-whisper path uses acoustic diarization via pyannote when it is
+        installed and a HuggingFace token is configured; every other path (and
+        faster-whisper without pyannote) falls back to a text-based heuristic.
         """
+        if diarize is None:
+            diarize = settings.ENABLE_DIARIZATION
+
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Audio file not found at {file_path}")
 
+        # faster-whisper is the only local engine that exposes word timestamps,
+        # so it is the one that can do true acoustic diarization.
         if HAS_FASTER_WHISPER:
             try:
+                if diarize:
+                    return self._transcribe_and_diarize_local(file_path)
                 return self._transcribe_with_local_model(file_path)
             except Exception as e:
                 print(f"faster-whisper transcription failed: {e}. Fallback to next engine...")
         else:
             print("faster-whisper is not installed. Fallback to next engine...")
 
+        # Remaining engines return a plain string; apply the text-based
+        # diarization heuristic afterwards if diarization was requested.
+        text = self._transcribe_with_remote_engines(file_path)
+        return self._diarize_text_heuristic(text) if diarize else text
+
+    def _transcribe_with_remote_engines(self, file_path: str) -> str:
+        """The non-faster-whisper engine chain, each producing a plain transcript."""
         if settings.VLLM_BASE_URL and settings.VLLM_BASE_URL.strip():
             try:
                 return self._transcribe_with_vllm(file_path)

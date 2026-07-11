@@ -113,7 +113,7 @@ const Signup = () => {
             <button
               type="submit"
               disabled={loading}
-              className="w-full bg-gradient-to-r from-primary-600 to-indigo-600 hover:from-primary-500 hover:to-indigo-500 text-white rounded-xl py-3.5 text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-lg glow-primary focus:outline-none"
+              className="w-full bg-gradient-to-r from-primary-600 to-indigo-600 hover:from-primary-500 hover:to-indigo-500 text-on-accent rounded-xl py-3.5 text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-lg glow-primary focus:outline-none"
             >
               {loading ? (
                 <>

@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Optional
 
 import google.generativeai as genai
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 from openai import OpenAI
 from ..config import settings
@@ -264,12 +264,24 @@ Transcript:
             "follow_ups": follow_ups[:3] if follow_ups else ["No direct follow-ups noted."]
         }
 
-    def generate_chat_response(self, query: str, context: str) -> str:
+    def generate_chat_response(
+        self,
+        query: str,
+        context: str,
+        history: Optional[List[Dict[str, str]]] = None,
+    ) -> str:
         """
-        Synthesizes a response using Gemini/OpenAI if keys exist, otherwise falls back to a template matching response.
+        Synthesizes a response using Gemini/OpenAI if keys exist, otherwise falls
+        back to a template matching response.
+
+        ``history`` is an optional list of prior turns, oldest first, as
+        ``{"role": "user"|"assistant", "content": str}``. Passing it lets the
+        assistant answer follow-up questions ("what about the second one?") with
+        the context of the ongoing conversation.
         """
-        prompt = f"""
-You are a helpful AI meeting assistant. Answer the user's question about the meeting using the provided transcript context.
+        history = self._normalize_history(history)
+
+        system_prompt = f"""You are a helpful AI meeting assistant. Answer the user's questions about the meeting using the provided transcript context and the ongoing conversation.
 If the answer is not in the context, politely state that it wasn't discussed in the meeting.
 
 Transcript Context:
@@ -277,29 +289,35 @@ Transcript Context:
 {context}
 \"\"\"
 
-User Question: {query}
+Provide concise and professional responses."""
 
-Provide a concise and professional response.
-"""
+        # OpenAI-style message list, reused/adapted per provider below.
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": query})
+
         # LangGraph synthesis
         if self.langgraph_agent:
             try:
-                return self._generate_with_langgraph(prompt)
+                return self._generate_with_langgraph(messages)
             except Exception as e:
                 print(f"LangGraph chat failed: {e}. Trying LangChain.")
 
         # LangChain synthesis
         if self.langchain_client:
             try:
-                return self._generate_with_langchain(prompt)
+                return self._generate_with_langchain(messages)
             except Exception as e:
                 print(f"LangChain chat failed: {e}. Trying Gemini.")
 
         # Gemini synthesis
         if self.gemini_key and self.gemini_key.strip() and not self.gemini_key.startswith("your_"):
             try:
-                model = genai.GenerativeModel("gemini-1.5-flash")
-                response = model.generate_content(prompt)
+                model = genai.GenerativeModel(
+                    "gemini-1.5-flash", system_instruction=system_prompt
+                )
+                chat = model.start_chat(history=self._gemini_history(history))
+                response = chat.send_message(query)
                 return response.text.strip()
             except Exception as e:
                 print(f"Gemini chat failed: {e}")
@@ -309,35 +327,75 @@ Provide a concise and professional response.
             try:
                 response = self.openai_client.chat.completions.create(
                     model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "You are a helpful AI meeting assistant."},
-                        {"role": "user", "content": prompt}
-                    ]
+                    messages=messages,
                 )
                 return response.choices[0].message.content.strip()
             except Exception as e:
                 print(f"OpenAI chat failed: {e}")
 
-        # Fallback keyword matching
-        query_lower = query.lower()
-        if "task" in query_lower or "action" in query_lower or "assigned" in query_lower:
-            return (
-                "Based on the meeting transcript:\n"
-                "- Sarah is assigned to complete the wireframes and upload them to Figma by Friday, June 19th.\n"
-                "- Mike is assigned to implement backend API endpoints and share Swagger docs by Thursday, June 18th.\n"
-                "- David is assigned to build React core dashboard components starting Monday, with a Wednesday, June 24th target.\n"
-                "- Alex is assigned to send a calendar invite for the design review meeting today."
-            )
+        # Fallback (no LLM available): naive retrieval over the provided context.
+        return self._chat_fallback(query, context)
 
-    def _generate_with_langchain(self, prompt: str) -> str:
-        response = self.langchain_client.invoke(HumanMessage(content=prompt))
+    def _normalize_history(self, history: Optional[List[Dict[str, str]]]) -> List[Dict[str, str]]:
+        """Keep only well-formed user/assistant turns with non-empty content."""
+        normalized: List[Dict[str, str]] = []
+        for turn in history or []:
+            role = (turn.get("role") or "").strip()
+            content = (turn.get("content") or "").strip()
+            if role in ("user", "assistant") and content:
+                normalized.append({"role": role, "content": content})
+        return normalized
+
+    def _gemini_history(self, history: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        """Map OpenAI-style roles to Gemini's ('assistant' -> 'model')."""
+        mapped = []
+        for turn in history:
+            role = "model" if turn["role"] == "assistant" else "user"
+            mapped.append({"role": role, "parts": [turn["content"]]})
+        return mapped
+
+    def _chat_fallback(self, query: str, context: str) -> str:
+        """Best-effort answer without an LLM: surface the most relevant lines
+        from the context by simple keyword overlap."""
+        query_words = {w for w in re.findall(r"\w+", query.lower()) if len(w) > 2}
+        lines = [ln.strip() for ln in re.split(r"[\n.!?]+", context) if ln.strip()]
+
+        scored = []
+        for line in lines:
+            line_words = set(re.findall(r"\w+", line.lower()))
+            overlap = len(query_words & line_words)
+            if overlap:
+                scored.append((overlap, line))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        if scored:
+            snippet = "\n".join(f"- {line}" for _, line in scored[:3])
+            return f"Based on the meeting transcript:\n{snippet}"
+
+        return (
+            "I couldn't find anything about that in this meeting's transcript. "
+            "It may not have been discussed."
+        )
+
+    def _generate_with_langchain(self, messages: List[Dict[str, str]]) -> str:
+        response = self.langchain_client.invoke(self._to_langchain_messages(messages))
         return getattr(response, "content", str(response)).strip()
 
-    def _generate_with_langgraph(self, prompt: str) -> str:
-        response = self.langgraph_agent.invoke(
-            {"messages": [{"role": "user", "content": prompt}]}
-        )
+    def _generate_with_langgraph(self, messages: List[Dict[str, str]]) -> str:
+        response = self.langgraph_agent.invoke({"messages": messages})
         return self._extract_langgraph_response(response)
+
+    def _to_langchain_messages(self, messages: List[Dict[str, str]]) -> List[Any]:
+        lc_messages = []
+        for m in messages:
+            role, content = m["role"], m["content"]
+            if role == "system":
+                lc_messages.append(SystemMessage(content=content))
+            elif role == "assistant":
+                lc_messages.append(AIMessage(content=content))
+            else:
+                lc_messages.append(HumanMessage(content=content))
+        return lc_messages
 
     def _extract_langgraph_response(self, response: Any) -> str:
         if isinstance(response, dict):

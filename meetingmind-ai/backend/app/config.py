@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     REPORT_DIR: str = str(BASE_DIR / "reports")
     CHROMA_DIR: str = str(BASE_DIR / "chromadb")
 
+    # Asynchronous processing — number of transcription/analysis jobs that may
+    # run concurrently in the in-process background worker pool. Keep this low:
+    # transcription is CPU/GPU-heavy and shares a single in-process model.
+    MAX_CONCURRENT_JOBS: int = 2
+
     # Transcription — preferred faster-whisper model; falls back to "small" then "tiny".
     # "large-v3-turbo" is multilingual (Hindi, English, 90+ languages) and fits a 4GB GPU.
     # Set to "distil-large-v3" for maximum English-only speed.
@@ -39,6 +44,15 @@ class Settings(BaseSettings):
     VLLM_BASE_URL: str = ""
     VLLM_MODEL: str = "ultravox"
     VLLM_API_KEY: str = "EMPTY"
+
+    # Speaker diarization — label transcript turns as "Speaker 1: ...", etc.
+    # When ENABLE_DIARIZATION is true, acoustic diarization runs only if
+    # pyannote.audio is installed AND HUGGINGFACE_TOKEN grants access to the
+    # gated diarization model; otherwise it gracefully falls back to a
+    # text-based heuristic. Off by default so existing behaviour is unchanged.
+    ENABLE_DIARIZATION: bool = False
+    HUGGINGFACE_TOKEN: str = ""
+    DIARIZATION_MODEL: str = "pyannote/speaker-diarization-3.1"
 
     # API Keys
     OPENAI_API_KEY: str = ""

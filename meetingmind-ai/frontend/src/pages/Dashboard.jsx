@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../utils/api';
+import { trackJob } from '../utils/jobs';
 import { 
   FileAudio, 
   ListTodo, 
@@ -44,6 +45,7 @@ const Dashboard = () => {
   // Upload state
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStage, setUploadStage] = useState('');
   const [uploadError, setUploadError] = useState('');
   const [dragActive, setDragActive] = useState(false);
 
@@ -120,41 +122,65 @@ const Dashboard = () => {
 
     setUploadError('');
     setUploading(true);
-    setUploadProgress(10);
+    setUploadProgress(0);
+    setUploadStage('Uploading file');
 
     const formData = new FormData();
     formData.append('file', file);
 
     try {
-      setUploadProgress(25);
+      // 1. Upload the raw audio (real byte-level progress, capped at 10%).
       const uploadRes = await api.post('/upload', formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (e) => {
+          if (e.total) {
+            setUploadProgress(Math.min(10, Math.round((e.loaded / e.total) * 10)));
+          }
         }
       });
-      
+
       const { filename, title } = uploadRes.data;
-      setUploadProgress(55);
+      setUploadProgress(10);
+      setUploadStage('Queued for processing');
 
-      const transcribeRes = await api.post('/transcribe', { filename, title });
-      const meetingId = transcribeRes.data.id;
-      setUploadProgress(80);
+      // 2. Hand off to the async pipeline — returns immediately with a task_id.
+      const procRes = await api.post('/process', { filename, title });
+      const taskId = procRes.data.task_id;
 
-      await api.post('/summarize', { meeting_id: meetingId });
-      await api.post('/extract-actions', { meeting_id: meetingId });
-      
-      setUploadProgress(100);
-      
-      setTimeout(() => {
-        setUploading(false);
-        setUploadProgress(0);
-        navigate(`/meeting/${meetingId}`);
-      }, 800);
+      // 3. Track real backend progress via SSE (falls back to polling).
+      trackJob(taskId, {
+        onUpdate: (data) => {
+          if (typeof data.progress === 'number') {
+            setUploadProgress(Math.max(10, data.progress));
+          }
+          if (data.stage) setUploadStage(data.stage);
+        },
+        onComplete: (data) => {
+          setUploadProgress(100);
+          setUploadStage('Ready');
+          setTimeout(() => {
+            setUploading(false);
+            setUploadProgress(0);
+            setUploadStage('');
+            if (data.meeting_id) navigate(`/meeting/${data.meeting_id}`);
+            else fetchDashboardData();
+          }, 600);
+        },
+        onError: (err) => {
+          console.error('Processing failed:', err);
+          setUploadError(err.message || 'An error occurred during processing.');
+          setUploading(false);
+          setUploadProgress(0);
+          setUploadStage('');
+        }
+      });
 
     } catch (err) {
       console.error("Upload workflow failed:", err);
       setUploadError(err.response?.data?.detail || 'An error occurred during file processing.');
       setUploading(false);
+      setUploadProgress(0);
+      setUploadStage('');
     }
   };
 
@@ -293,11 +319,11 @@ const Dashboard = () => {
                 <div className="space-y-4 py-6">
                   <Loader2 className="w-12 h-12 text-primary-500 animate-spin mx-auto" />
                   <div>
-                    <p className="font-semibold text-white text-lg">Processing Audio File...</p>
-                    <p className="text-xs text-slate-400 mt-1">Transcribing speech via Whisper and compiling summaries.</p>
+                    <p className="font-semibold text-white text-lg">{uploadStage || 'Processing Audio File...'}</p>
+                    <p className="text-xs text-slate-400 mt-1">Live status streamed from the backend as your recording is processed.</p>
                   </div>
                   <div className="w-full max-w-sm bg-slate-850 rounded-full h-2 mx-auto overflow-hidden">
-                    <div 
+                    <div
                       className="bg-gradient-to-r from-primary-500 to-indigo-500 h-2 rounded-full transition-all duration-300"
                       style={{ width: `${uploadProgress}%` }}
                     />

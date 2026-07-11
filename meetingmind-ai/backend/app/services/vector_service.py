@@ -1,5 +1,7 @@
 import os
+import re
 import math
+from collections import Counter
 from typing import List, Dict, Any
 from ..config import settings
 
@@ -12,48 +14,113 @@ except ImportError:
     HAS_CHROMADB = False
     print("chromadb not installed or failed to import. Using native fallback vector store.")
 
+# Word-level tokenizer: lowercase alphanumeric runs. Shared so indexing and
+# querying tokenize identically.
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _tokenize(text: str) -> List[str]:
+    return _TOKEN_RE.findall(text.lower())
+
+
 class FallbackVectorStore:
     """
-    A lightweight, native Python SQLite/in-memory vector store fallback.
-    Uses TF-IDF / overlap vector representations and cosine similarity.
+    A lightweight, dependency-free vector store used when ChromaDB is
+    unavailable.
+
+    Each meeting's transcript is chunked, and every chunk is represented as a
+    TF-IDF vector (smoothed IDF, L2-normalized). Queries are ranked by cosine
+    similarity, which captures term importance far better than the previous
+    plain Jaccard word-overlap heuristic (rare, discriminative words dominate
+    over common filler words).
     """
     def __init__(self):
-        self.documents = {}  # meeting_id -> list of chunks
+        # meeting_id -> {"chunks": [...], "vectors": [ {term: weight} ], "idf": {term: idf}}
+        self.documents: Dict[int, Dict[str, Any]] = {}
 
     def add_transcript(self, meeting_id: int, transcript: str):
         chunks = self._chunk_text(transcript)
-        self.documents[meeting_id] = chunks
+        self.documents[meeting_id] = self._build_index(chunks)
 
     def query_transcript(self, meeting_id: int, query: str, limit: int = 3) -> List[str]:
-        chunks = self.documents.get(meeting_id, [])
-        if not chunks:
-            # Try to chunk it dynamically if not stored
+        doc = self.documents.get(meeting_id)
+        if not doc or not doc["chunks"]:
             return []
 
-        # Simple Jaccard/Overlap similarity for ranking
-        query_words = set(query.lower().split())
-        scored_chunks = []
-        for chunk in chunks:
-            chunk_words = set(chunk.lower().split())
-            intersection = query_words.intersection(chunk_words)
-            union = query_words.union(chunk_words)
-            score = len(intersection) / len(union) if union else 0.0
-            scored_chunks.append((score, chunk))
+        query_vec = self._embed(_tokenize(query), doc["idf"])
+        chunks = doc["chunks"]
+        vectors = doc["vectors"]
 
-        # Sort by score descending
-        scored_chunks.sort(key=lambda x: x[0], reverse=True)
-        return [chunk for score, chunk in scored_chunks[:limit]]
+        # Cosine similarity == dot product of L2-normalized vectors.
+        scored = [
+            (self._cosine(query_vec, vectors[i]), i)
+            for i in range(len(chunks))
+        ]
+        scored.sort(key=lambda x: (x[0], -x[1]), reverse=True)
+
+        # If nothing overlaps the query, fall back to the leading chunks so the
+        # chat still receives some context rather than nothing.
+        if scored and scored[0][0] == 0.0:
+            return chunks[:limit]
+        return [chunks[i] for _, i in scored[:limit]]
 
     def delete_transcript(self, meeting_id: int):
         if meeting_id in self.documents:
             del self.documents[meeting_id]
+
+    # ------------------- TF-IDF internals -------------------
+
+    def _build_index(self, chunks: List[str]) -> Dict[str, Any]:
+        tokenized = [_tokenize(c) for c in chunks]
+        n_docs = len(chunks)
+
+        # Document frequency: number of chunks each term appears in.
+        df: Counter = Counter()
+        for tokens in tokenized:
+            for term in set(tokens):
+                df[term] += 1
+
+        # Smoothed IDF (sklearn-style): log((1 + N) / (1 + df)) + 1. Always
+        # positive, so single-chunk documents still yield usable vectors.
+        idf = {
+            term: math.log((1 + n_docs) / (1 + freq)) + 1.0
+            for term, freq in df.items()
+        }
+
+        vectors = [self._embed(tokens, idf) for tokens in tokenized]
+        return {"chunks": chunks, "vectors": vectors, "idf": idf}
+
+    def _embed(self, tokens: List[str], idf: Dict[str, float]) -> Dict[str, float]:
+        """Build an L2-normalized TF-IDF vector for a token list. Terms absent
+        from ``idf`` (unseen at index time) contribute nothing to similarity and
+        are dropped."""
+        if not tokens:
+            return {}
+        tf = Counter(tokens)
+        vec = {
+            term: count * idf[term]
+            for term, count in tf.items()
+            if term in idf
+        }
+        norm = math.sqrt(sum(w * w for w in vec.values()))
+        if norm == 0.0:
+            return {}
+        return {term: w / norm for term, w in vec.items()}
+
+    @staticmethod
+    def _cosine(vec_a: Dict[str, float], vec_b: Dict[str, float]) -> float:
+        # Both vectors are already L2-normalized, so the dot product is cosine.
+        # Iterate over the smaller vector for efficiency.
+        if len(vec_a) > len(vec_b):
+            vec_a, vec_b = vec_b, vec_a
+        return sum(w * vec_b.get(term, 0.0) for term, w in vec_a.items())
 
     def _chunk_text(self, text: str, chunk_size: int = 150, overlap: int = 30) -> List[str]:
         words = text.split()
         chunks = []
         if len(words) <= chunk_size:
             return [text]
-        
+
         i = 0
         while i < len(words):
             chunk = " ".join(words[i:i + chunk_size])
