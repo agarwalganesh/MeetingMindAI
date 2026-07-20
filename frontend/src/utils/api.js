@@ -1,7 +1,11 @@
 import axios from 'axios';
 
-// FastAPI default address is http://localhost:8000
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
+// VITE_API_URL overrides; otherwise production builds use the deployed
+// backend and dev builds use the local FastAPI default (localhost:8000).
+const API_URL = import.meta.env.VITE_API_URL
+  || (import.meta.env.PROD
+    ? 'https://meetingmindai-4ncr.onrender.com/api'
+    : 'http://localhost:8000/api');
 
 const api = axios.create({
   baseURL: API_URL,

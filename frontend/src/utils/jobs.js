@@ -3,7 +3,10 @@ import api from './api';
 // Base URL for raw EventSource connections (EventSource can't reuse the axios
 // instance / its auth interceptor, so we build the URL and pass the token as a
 // query param — the backend's SSE endpoint accepts ?token=).
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
+const API_URL = import.meta.env.VITE_API_URL
+  || (import.meta.env.PROD
+    ? 'https://meetingmindai-4ncr.onrender.com/api'
+    : 'http://localhost:8000/api');
 
 /**
  * Track an async processing job to completion.
