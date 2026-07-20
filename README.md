@@ -33,7 +33,7 @@ MeetingMind AI is a production-ready SaaS web application designed to automatica
 ## Folder Structure
 
 ```
-meetingmind-ai/
+MeetingMindAI/
 ├── backend/              # FastAPI Application (Python)
 │   ├── app/
 │   │   ├── main.py       # API configuration & routes linking

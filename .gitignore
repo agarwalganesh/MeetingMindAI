@@ -27,13 +27,13 @@ env/
 *.sqlite3
 
 # Uploaded audio files and generated reports
-meetingmind-ai/uploads/*
-!meetingmind-ai/uploads/.gitkeep
-meetingmind-ai/reports/*
-!meetingmind-ai/reports/.gitkeep
+uploads/*
+!uploads/.gitkeep
+reports/*
+!reports/.gitkeep
 
 # Vector store data
-meetingmind-ai/chromadb/
+chromadb/
 
 # Logs
 *.log
@@ -44,7 +44,12 @@ node_modules/
 .npm/
 
 # Vite / frontend build
-meetingmind-ai/frontend/dist/
+frontend/dist/
+
+# Local tooling and test artifacts
+.claude/
+dummy.mp3
+lint_results.json
 
 # IDE
 .vscode/
