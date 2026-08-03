@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../utils/api';
 import { trackJob } from '../utils/jobs';
@@ -15,8 +15,7 @@ import {
   TrendingUp,
   Smile,
   Zap,
-  Activity,
-  Plus
+  Activity
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -49,11 +48,7 @@ const Dashboard = () => {
   const [uploadError, setUploadError] = useState('');
   const [dragActive, setDragActive] = useState(false);
 
-  useEffect(() => {
-    fetchDashboardData();
-  }, []);
-
-  const fetchDashboardData = async () => {
+  const fetchDashboardData = useCallback(async () => {
     try {
       const res = await api.get('/meetings');
       const meetingsList = res.data;
@@ -86,7 +81,11 @@ const Dashboard = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchDashboardData();
+  }, [fetchDashboardData]);
 
   const handleDrag = (e) => {
     e.preventDefault();
@@ -191,7 +190,7 @@ const Dashboard = () => {
         await api.delete(`/meeting/${id}`);
         setMeetings(meetings.filter(m => m.id !== id));
         fetchDashboardData();
-      } catch (err) {
+      } catch {
         alert("Failed to delete meeting.");
       }
     }

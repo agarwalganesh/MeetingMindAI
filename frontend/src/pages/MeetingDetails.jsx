@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import WaveSurfer from 'wavesurfer.js';
 import api from '../utils/api';
@@ -15,7 +15,6 @@ import {
   Edit,
   Check,
   Trash2,
-  Plus,
   Loader2,
   Send,
   PieChart as PieIcon,
@@ -37,6 +36,8 @@ import {
   Legend
 } from 'recharts';
 
+const GREETING = { role: 'assistant', text: 'Hi! Ask me anything about this meeting\'s contents, discussions, decisions, or deadlines.' };
+
 const MeetingDetails = () => {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -51,7 +52,6 @@ const MeetingDetails = () => {
   const [copiedTranscript, setCopiedTranscript] = useState(false);
 
   // Chat state
-  const GREETING = { role: 'assistant', text: 'Hi! Ask me anything about this meeting\'s contents, discussions, decisions, or deadlines.' };
   const [chatInput, setChatInput] = useState('');
   const [chatHistory, setChatHistory] = useState([GREETING]);
   const [chatLoading, setChatLoading] = useState(false);
@@ -75,11 +75,6 @@ const MeetingDetails = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-
-  useEffect(() => {
-    fetchMeetingDetails();
-    fetchChatHistory();
-  }, [id]);
 
   // Fetch the audio (auth'd, as a blob so the JWT header applies) and render a
   // WaveSurfer waveform. Waits until the meeting has loaded so the waveform
@@ -167,7 +162,21 @@ const MeetingDetails = () => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatHistory]);
 
-  const fetchChatHistory = async () => {
+  const fetchMeetingDetails = useCallback(async () => {
+    try {
+      const res = await api.get(`/meeting/${id}`);
+      setMeeting(res.data);
+      setEditedTranscript(res.data.transcript || '');
+    } catch (err) {
+      console.error("Error fetching meeting:", err);
+      alert("Failed to load meeting details.");
+      navigate('/');
+    } finally {
+      setLoading(false);
+    }
+  }, [id, navigate]);
+
+  const fetchChatHistory = useCallback(async () => {
     try {
       const res = await api.get(`/meeting/${id}/chat-history`);
       if (Array.isArray(res.data) && res.data.length > 0) {
@@ -177,10 +186,9 @@ const MeetingDetails = () => {
         ]);
       }
     } catch (err) {
-      // Non-fatal: fall back to a fresh conversation.
       console.error('Failed to load chat history:', err);
     }
-  };
+  }, [id]);
 
   const handleClearChat = async () => {
     setClearingChat(true);
@@ -195,19 +203,10 @@ const MeetingDetails = () => {
     }
   };
 
-  const fetchMeetingDetails = async () => {
-    try {
-      const res = await api.get(`/meeting/${id}`);
-      setMeeting(res.data);
-      setEditedTranscript(res.data.transcript || '');
-    } catch (err) {
-      console.error("Error fetching meeting:", err);
-      alert("Failed to load meeting details.");
-      navigate('/');
-    } finally {
-      setLoading(false);
-    }
-  };
+  useEffect(() => {
+    fetchMeetingDetails();
+    fetchChatHistory();
+  }, [fetchMeetingDetails, fetchChatHistory]);
 
   const handleDownloadPDF = async () => {
     setDownloadingPDF(true);
@@ -253,7 +252,7 @@ const MeetingDetails = () => {
       const res = await api.put(`/meeting/${id}/transcript`, { transcript: editedTranscript });
       setMeeting(res.data);
       setIsEditingTranscript(false);
-    } catch (err) {
+    } catch {
       alert("Failed to save transcript.");
     } finally {
       setSavingTranscript(false);
@@ -275,7 +274,7 @@ const MeetingDetails = () => {
         message: userMessage
       });
       setChatHistory(prev => [...prev, { role: 'assistant', text: res.data.response }]);
-    } catch (err) {
+    } catch {
       setChatHistory(prev => [...prev, { role: 'assistant', text: 'Sorry, I encountered an error searching the transcript.' }]);
     } finally {
       setChatLoading(false);
@@ -300,7 +299,7 @@ const MeetingDetails = () => {
         action_items: prev.action_items.map(item => item.id === actionId ? res.data : item)
       }));
       setEditingActionId(null);
-    } catch (err) {
+    } catch {
       alert("Failed to save action item.");
     } finally {
       setSavingActionId(null);
@@ -315,7 +314,7 @@ const MeetingDetails = () => {
         ...prev,
         action_items: prev.action_items.map(item => item.id === action.id ? res.data : item)
       }));
-    } catch (err) {
+    } catch {
       alert("Failed to update status.");
     }
   };

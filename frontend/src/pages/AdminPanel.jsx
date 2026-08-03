@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import api from '../utils/api';
 import { 
   ShieldAlert, 
@@ -8,8 +8,7 @@ import {
   BarChart, 
   Activity, 
   Cpu, 
-  Loader2,
-  Calendar
+  Loader2
 } from 'lucide-react';
 
 const AdminPanel = () => {
@@ -19,12 +18,8 @@ const AdminPanel = () => {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('users');
 
-  useEffect(() => {
-    fetchAdminData();
-  }, []);
-
-  const fetchAdminData = async () => {
-    setLoading(true);
+  const fetchAdminData = useCallback(async (showLoading = false) => {
+    if (showLoading) setLoading(true);
     try {
       const [analyticsRes, usersRes, meetingsRes] = await Promise.all([
         api.get('/admin/analytics'),
@@ -33,14 +28,18 @@ const AdminPanel = () => {
       ]);
 
       setAnalytics(analyticsRes.data);
-      setUsers(usersRes.data);
-      setMeetings(meetingsRes.data);
+      setUsers(Array.isArray(usersRes.data) ? usersRes.data : usersRes.data?.items || []);
+      setMeetings(Array.isArray(meetingsRes.data) ? meetingsRes.data : meetingsRes.data?.items || []);
     } catch (err) {
       console.error("Failed to fetch admin dashboard records:", err);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchAdminData(false);
+  }, [fetchAdminData]);
 
   const handleDeleteUser = async (userId) => {
     if (window.confirm("WARNING: Deleting this user will permanently destroy all their meeting files, transcripts, vector indexes, and action items. Proceed?")) {
@@ -64,7 +63,7 @@ const AdminPanel = () => {
         // Refresh analytics
         const analyticRes = await api.get('/admin/analytics');
         setAnalytics(analyticRes.data);
-      } catch (err) {
+      } catch {
         alert("Failed to delete meeting.");
       }
     }
